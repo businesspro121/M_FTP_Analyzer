@@ -1,0 +1,17 @@
+[
+  {
+    "column": "TRANSFER_RATE",
+    "condition": "(pd.isna(x)) or (isinstance(x, str) and x.strip() == '')",
+    "description": "TRANSFER_RATE must be present (not null/NaN or blank)."
+  },
+  {
+    "column": "MATURITY_DATE",
+    "condition": "(not pd.isna(x)) and pd.to_datetime(x) < pd.Timestamp.now()",
+    "description": "MATURITY_DATE must not be in the past relative to the current time."
+  },
+  {
+    "column": "LAST_REPRICE_DATE",
+    "condition": "(not pd.isna(x)) and pd.to_datetime(x) > (pd.Timestamp.now().normalize() + pd.offsets.MonthEnd(0))",
+    "description": "LAST_REPRICE_DATE must not be after the end of the current month."
+  }
+]
