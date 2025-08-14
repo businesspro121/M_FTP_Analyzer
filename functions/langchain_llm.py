@@ -6,13 +6,129 @@ from langchain_community.chat_models.oci_generative_ai import ChatOCIGenAI
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
 
-# === LLM initialisation ===
-llm = ChatOCIGenAI(
-    model_id="cohere.command-r-plus-08-2024",
-    service_endpoint="https://inference.generativeai.us-chicago-1.oci.oraclecloud.com",
-    compartment_id="ocid1.compartment.oc1..aaaaaaaaxj6dyzjb6zggtwoaavl6apkzzgd7tv3lykpl6bmmf6iffegu5woa",
-    model_kwargs={"temperature": 0.0, "max_tokens": 800}
+
+import os
+import stat
+import pathlib
+import urllib.parse
+import streamlit as st
+from typing import Optional
+from langchain_community.chat_models.oci_generative_ai import ChatOCIGenAI
+from langchain_core.messages import HumanMessage, SystemMessage
+
+# ---------- Secrets/env helpers ----------
+def _get(name: str, required: bool = True, default=None):
+    """Fetch from st.secrets (preferred) then environment."""
+    val = st.secrets.get(name) if hasattr(st, "secrets") else None
+    if val is None or str(val).strip() == "":
+        val = os.getenv(name, default)
+    if required and (val is None or str(val).strip() == ""):
+        raise RuntimeError(f"Missing required secret/env: {name}")
+    return val
+
+MODEL_ID         = _get("OCI_MODEL_ID")
+SERVICE_ENDPOINT = _get("OCI_ENDPOINT")
+COMPARTMENT_OCID = _get("OCI_COMPARTMENT_OCID")
+
+TENANCY_OCID     = _get("OCI_TENANCY_OCID")
+USER_OCID        = _get("OCI_USER_OCID")
+FINGERPRINT      = _get("OCI_FINGERPRINT")
+PRIVATE_KEY_PEM  = _get("OCI_PRIVATE_KEY")   # full PEM string from secrets
+PASSPHRASE       = _get("OCI_PASSPHRASE", required=False, default=None)
+
+LLM_TEMPERATURE  = float(_get("LLM_TEMPERATURE", required=False, default="0.0"))
+LLM_MAX_TOKENS   = int(_get("LLM_MAX_TOKENS", required=False, default=800))
+
+
+# ---------- OCI config bootstrap (file-based, works locally & on Streamlit Cloud) ----------
+def _infer_region_from_endpoint(endpoint: str) -> str:
+    host = urllib.parse.urlparse(endpoint).netloc  # e.g., inference.generativeai.us-chicago-1.oci.oraclecloud.com
+    parts = host.split(".")
+    # Find the token after "generativeai"
+    try:
+        gi = parts.index("generativeai")
+        return parts[gi + 1]  # e.g., "us-chicago-1"
+    except Exception:
+        # Fallback to us-chicago-1 if parsing fails
+        return "us-chicago-1"
+
+def _ensure_oci_files(tenancy: str, user: str, fingerprint: str, pem: str, region: str, passphrase: Optional[str]) -> None:
+    home = pathlib.Path.home()
+    oci_dir = home / ".oci"
+    oci_dir.mkdir(parents=True, exist_ok=True)
+
+    key_path = oci_dir / "oci_api_key.pem"
+    pem = pem.strip()
+    # Write PEM with a trailing newline
+    key_path.write_text(pem + ("\n" if not pem.endswith("\n") else ""), encoding="utf-8")
+    try:
+        os.chmod(key_path, stat.S_IRUSR | stat.S_IWUSR)  # 600 where supported
+    except Exception:
+        pass
+
+    config_path = oci_dir / "config"
+    config_lines = [
+        "[DEFAULT]",
+        f"user={user}",
+        f"fingerprint={fingerprint}",
+        f"tenancy={tenancy}",
+        f"region={region}",
+        f"key_file={str(key_path)}",
+    ]
+    if passphrase and str(passphrase).strip():
+        config_lines.append(f"pass_phrase={passphrase}")
+    config_text = "\n".join(config_lines) + "\n"
+    config_path.write_text(config_text, encoding="utf-8")
+
+    # Optional: tell tools where the config is (some libs honor this)
+    os.environ.setdefault("OCI_CONFIG_FILE", str(config_path))
+    os.environ.setdefault("OCI_CONFIG_PROFILE", "DEFAULT")
+
+REGION = _infer_region_from_endpoint(SERVICE_ENDPOINT)
+_ensure_oci_files(
+    tenancy=TENANCY_OCID,
+    user=USER_OCID,
+    fingerprint=FINGERPRINT,
+    pem=PRIVATE_KEY_PEM,
+    region=REGION,
+    passphrase=PASSPHRASE,
 )
+
+# ---------- Initialize LLM (only accepted fields) ----------
+# ChatOCIGenAI validates inputs via Pydantic and does NOT accept signer/tenancy/user/etc. directly.
+# It will pick credentials up from ~/.oci/config we just wrote.
+llm = ChatOCIGenAI(
+    model_id=MODEL_ID,
+    service_endpoint=SERVICE_ENDPOINT,
+    compartment_id=COMPARTMENT_OCID,
+    model_kwargs={
+        "temperature": LLM_TEMPERATURE,
+        "max_tokens": LLM_MAX_TOKENS,
+    },
+)
+
+# ---------- Simple query function your pages import ----------
+def query_llm(prompt: str, system_prompt: Optional[str] = None) -> str:
+    if system_prompt and system_prompt.strip():
+        messages = [SystemMessage(content=system_prompt), HumanMessage(content=prompt)]
+        resp = llm.invoke(messages)
+    else:
+        resp = llm.invoke(prompt)
+    # resp is an AIMessage; return text content
+    return getattr(resp, "content", str(resp))
+
+
+
+# === LLM initialisation ===
+#llm = ChatOCIGenAI(
+    #    model_id="cohere.command-r-plus-08-2024",
+    #service_endpoint="https://inference.generativeai.us-chicago-1.oci.oraclecloud.com",
+    #compartment_id="ocid1.compartment.oc1..aaaaaaaaxj6dyzjb6zggtwoaavl6apkzzgd7tv3lykpl6bmmf6iffegu5woa",
+    #model_kwargs={"temperature": 0.0, "max_tokens": 800}
+#)
+
+
+
 
 # === Load authoritative FTP policies (JSON-driven scope) ===
 FTP_SCOPE_AVAILABLE = True
